@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 plt.switch_backend('agg')
 import numpy as np
 from PIL import Image
-import bcolz
+# import bcolz
 import io
 import os
 
@@ -52,23 +52,23 @@ def make_weights_for_balanced_classes(images, nclasses):
     return weight
 
 
-def get_val_pair(path, name):
-    carray = bcolz.carray(rootdir = os.path.join(path, name), mode = 'r')
-    issame = np.load('{}/{}_list.npy'.format(path, name))
+# def get_val_pair(path, name):
+#     carray = bcolz.carray(rootdir = os.path.join(path, name), mode = 'r')
+#     issame = np.load('{}/{}_list.npy'.format(path, name))
 
-    return carray, issame
+#     return carray, issame
 
 
-def get_val_data(data_path):
-    lfw, lfw_issame = get_val_pair(data_path, 'lfw')
-    cfp_ff, cfp_ff_issame = get_val_pair(data_path, 'cfp_ff')
-    cfp_fp, cfp_fp_issame = get_val_pair(data_path, 'cfp_fp')
-    agedb_30, agedb_30_issame = get_val_pair(data_path, 'agedb_30')
-    calfw, calfw_issame = get_val_pair(data_path, 'calfw')
-    cplfw, cplfw_issame = get_val_pair(data_path, 'cplfw')
-    vgg2_fp, vgg2_fp_issame = get_val_pair(data_path, 'vgg2_fp')
+# def get_val_data(data_path):
+#     lfw, lfw_issame = get_val_pair(data_path, 'lfw')
+#     cfp_ff, cfp_ff_issame = get_val_pair(data_path, 'cfp_ff')
+#     cfp_fp, cfp_fp_issame = get_val_pair(data_path, 'cfp_fp')
+#     agedb_30, agedb_30_issame = get_val_pair(data_path, 'agedb_30')
+#     calfw, calfw_issame = get_val_pair(data_path, 'calfw')
+#     cplfw, cplfw_issame = get_val_pair(data_path, 'cplfw')
+#     vgg2_fp, vgg2_fp_issame = get_val_pair(data_path, 'vgg2_fp')
 
-    return lfw, cfp_ff, cfp_fp, agedb_30, calfw, cplfw, vgg2_fp, lfw_issame, cfp_ff_issame, cfp_fp_issame, agedb_30_issame, calfw_issame, cplfw_issame, vgg2_fp_issame
+#     return lfw, cfp_ff, cfp_fp, agedb_30, calfw, cplfw, vgg2_fp, lfw_issame, cfp_ff_issame, cfp_fp_issame, agedb_30_issame, calfw_issame, cplfw_issame, vgg2_fp_issame
 
 
 def separate_irse_bn_paras(modules):
@@ -141,24 +141,20 @@ def hflip_batch(imgs_tensor):
 
 
 ccrop = transforms.Compose([
-            de_preprocess,
             transforms.ToPILImage(),
-            transforms.Resize([128, 128]),  # smaller side resized
-            transforms.CenterCrop([112, 112]),
             transforms.ToTensor(),
-            transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
+            transforms.Normalize([0.5], [0.5])
         ])
 
 
 def ccrop_batch(imgs_tensor):
-    ccropped_imgs = torch.empty_like(imgs_tensor)
+    ccropped_imgs = torch.empty_like(imgs_tensor).to(torch.float32)
     for i, img_ten in enumerate(imgs_tensor):
         ccropped_imgs[i] = ccrop(img_ten)
-
     return ccropped_imgs
 
 
-def gen_plot(fpr, tpr):
+def gen_plot(fpr, tpr, far, frr, thresholds):
     """Create a pyplot plot and save to buffer."""
     plt.figure()
     plt.xlabel("FPR", fontsize = 14)
@@ -170,7 +166,17 @@ def gen_plot(fpr, tpr):
     buf.seek(0)
     plt.close()
 
-    return buf
+    plt.figure()
+    plt.title("FAR/FRR график", fontsize = 14)
+    plt.plot(thresholds, far, label = "FAR", linewidth = 2)
+    plt.plot(thresholds, frr, label = "FRR", linewidth = 2)
+    plt.legend()
+    buf_far_frr = io.BytesIO()
+    plt.savefig(buf_far_frr, format = 'jpeg')
+    buf_far_frr.seek(0)
+    plt.close()
+
+    return buf, buf_far_frr
 
 
 def perform_val(multi_gpu, device, embedding_size, batch_size, backbone, carray, issame, nrof_folds = 10, tta = True):
@@ -185,7 +191,8 @@ def perform_val(multi_gpu, device, embedding_size, batch_size, backbone, carray,
     embeddings = np.zeros([len(carray), embedding_size])
     with torch.no_grad():
         while idx + batch_size <= len(carray):
-            batch = torch.tensor(carray[idx:idx + batch_size][:, [2, 1, 0], :, :])
+            batch = torch.tensor(carray[idx:idx + batch_size])
+            batch = torch.unsqueeze(batch, 1)
             if tta:
                 ccropped = ccrop_batch(batch)
                 fliped = hflip_batch(ccropped)
@@ -197,6 +204,7 @@ def perform_val(multi_gpu, device, embedding_size, batch_size, backbone, carray,
             idx += batch_size
         if idx < len(carray):
             batch = torch.tensor(carray[idx:])
+            batch = torch.unsqueeze(batch, 1)
             if tta:
                 ccropped = ccrop_batch(batch)
                 fliped = hflip_batch(ccropped)
@@ -206,19 +214,24 @@ def perform_val(multi_gpu, device, embedding_size, batch_size, backbone, carray,
                 ccropped = ccrop_batch(batch)
                 embeddings[idx:] = l2_norm(backbone(ccropped.to(device))).cpu()
 
-    tpr, fpr, accuracy, best_thresholds = evaluate(embeddings, issame, nrof_folds)
-    buf = gen_plot(fpr, tpr)
+    tpr, fpr, accuracy, best_thresholds, far, frr, thresholds, eer = evaluate(embeddings, issame, nrof_folds)
+    buf, buf_far_frr = gen_plot(fpr, tpr, far, frr, thresholds)
     roc_curve = Image.open(buf)
     roc_curve_tensor = transforms.ToTensor()(roc_curve)
 
-    return accuracy.mean(), best_thresholds.mean(), roc_curve_tensor
+    far_frr_curve = Image.open(buf_far_frr)
+    far_frr_curve_tensor = transforms.ToTensor()(far_frr_curve)
+
+    return accuracy.mean(), best_thresholds.mean(), roc_curve_tensor, far_frr_curve_tensor, eer
 
 
-def buffer_val(writer, db_name, acc, best_threshold, roc_curve_tensor, epoch):
+def buffer_val(writer, db_name, acc, best_threshold, roc_curve_tensor, far_frr_curve_tensor, ERR, epoch):
     writer.add_scalar('{}_Accuracy'.format(db_name), acc, epoch)
     writer.add_scalar('{}_Best_Threshold'.format(db_name), best_threshold, epoch)
     writer.add_image('{}_ROC_Curve'.format(db_name), roc_curve_tensor, epoch)
-
+    writer.add_image('{}_FAR\FRR_Curve'.format(db_name), far_frr_curve_tensor, epoch)
+    writer.add_scalar('{}_EER'.format(db_name), ERR, epoch)
+     
 
 class AverageMeter(object):
     """Computes and stores the average and current value"""
@@ -249,7 +262,7 @@ def accuracy(output, target, topk=(1,)):
 
     res = []
     for k in topk:
-        correct_k = correct[:k].view(-1).float().sum(0)
+        correct_k = correct[:k].contiguous().view(-1).float().sum(0)
         res.append(correct_k.mul_(100.0 / batch_size))
 
     return res
