@@ -21,6 +21,9 @@
 
     pip install tensorboard
     cd log && tensorboard --logdir=./
+    
+### CHECKPOINTS
+https://drive.google.com/drive/folders/1r-pC0pyT7trrsTbaWhIichbhNAav6Bxi?usp=sharing
 
 ### PS
 
